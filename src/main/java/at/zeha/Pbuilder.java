@@ -24,7 +24,7 @@ import java.io.IOException;
 import java.io.File;
 
 /**
- * Sample {@link Builder}.
+ * Debian pbuilder {@link Builder}.
  *
  * <p>
  * When the user configures the project and enables this builder,
@@ -55,6 +55,8 @@ public class Pbuilder extends Builder {
 
     /**
      * We'll use this from the <tt>config.jelly</tt>.
+     * 
+     * FIXME: doing defaults in the isEmpty case is probably not the best way to do them.
      */
     public String getMirror() {
     	if (mirror.isEmpty())
@@ -74,7 +76,6 @@ public class Pbuilder extends Builder {
 		return outputDir;
 	}
 
-
     @Override
     public boolean perform(AbstractBuild build, Launcher launcher, BuildListener listener) throws InterruptedException {
     	ArgumentListBuilder args = new ArgumentListBuilder();
@@ -86,6 +87,7 @@ public class Pbuilder extends Builder {
         	EnvVars env = build.getEnvironment(listener);
         	env.override("DEBIAN_FRONTEND", "noninteractive");
 
+        	/* Install pbuilder if it ain't there */
 			args.clear();
 			args.add("sudo");
 			args.add("apt-get");
@@ -94,29 +96,37 @@ public class Pbuilder extends Builder {
 			args.add("build-essential");
 			args.add("devscripts");
 			args.add("pbuilder");
-			listener.getLogger().println(args.toStringWithQuote());
+			listener.getLogger().printf("[pbuilder] $ %s\n", args.toStringWithQuote());
 			rc = launcher.launch().cmds(args).envs(env).stdout(listener).pwd(workspace).join();
 			if (rc != 0)
 				throw new CommandFailedException(rc);
 			
+			/* prepare (= wipe + create) our output directory */
 			hudson.FilePath outputDir = workspace.child(this.outputDir);
 			listener.getLogger().printf("[pbuilder] Cleaning outputDir \"%s\"\n", outputDir);
 			if (outputDir.exists())
 				outputDir.deleteRecursive();
 			outputDir.mkdirs();
 			
+			/* create package source (dsc + diff.gz + tar.gz) */
 			args.clear();
 			args.add("dpkg-source");
 			args.add("-b");
 			args.add("-I" + outputDir.getName());
+			args.add("-ICVS"); // FIXME: make this configurable
+			args.add("-I.svn");
+			args.add("-I.git");
 			args.add(workspace);
-			listener.getLogger().printf("[pbuilder] %s\n", args.toStringWithQuote());
+			listener.getLogger().printf("[pbuilder] $ %s\n", args.toStringWithQuote());
 			rc = launcher.launch().cmds(args).envs(env).stdout(listener).pwd(outputDir).join();
 			if (rc != 0)
 				throw new CommandFailedException(rc);
 
+			/* prepare the pbuilder build root ("base.tgz") */
 			hudson.FilePath pbuilderBaseTgz = outputDir.child(String.format("pbuilder-base-%s.tgz", distribution));
 			if (true) {
+				// in future versions we could reuse an old base.tgz from a previous build
+				// for now just recreate it everytime
 				args.clear();
 				args.add("sudo");
 				args.add("pbuilder");
@@ -127,12 +137,13 @@ public class Pbuilder extends Builder {
 				args.add(mirror);
 				args.add("--distribution");
 				args.add(distribution);
-				listener.getLogger().printf("[pbuilder] %s\n", args.toStringWithQuote());
+				listener.getLogger().printf("[pbuilder] $ %s\n", args.toStringWithQuote());
 				rc = launcher.launch().cmds(args).envs(env).stdout(listener).pwd(workspace).join();
 				if (rc != 0)
 					throw new CommandFailedException(rc);
 			}
 
+			/* do the actual build */
 			build.getArtifactsDir().mkdir();
 			FilePath[] dscs = outputDir.list("*.dsc");
 			for (FilePath dsc: dscs) {
@@ -145,17 +156,25 @@ public class Pbuilder extends Builder {
 				args.add("--buildresult");
 				args.add(outputDir);
 				args.add(dsc);
-				listener.getLogger().printf("[pbuilder] %s\n", args.toStringWithQuote());
+				listener.getLogger().printf("[pbuilder] $ %s\n", args.toStringWithQuote());
 				rc = launcher.launch().cmds(args).envs(env).stdout(listener).pwd(workspace).join();
 				if (rc != 0)
 					throw new CommandFailedException(rc);
 			}
+			
+			/* show a list of outputs */
+			FilePath[] files = outputDir.list("*");
+			for (FilePath f: files) {
+				listener.getLogger().printf("[pbuilder] output: %s\n", f.getName());
+			}
+			
 		} catch (IOException e) {
 			Util.displayIOException(e,listener);
 			e.printStackTrace(listener.error("I/O Exception"));
 			build.setResult(Result.FAILURE);
 			return true;
 		} catch (CommandFailedException e) {
+			/* a command return non-zero, abort the build */
 			e.printStackTrace(listener.error("Command failed Exception"));
 			build.setResult(Result.FAILURE);
 			return true;
@@ -236,9 +255,6 @@ public class Pbuilder extends Builder {
         public String getDisplayName() {
             return "pbuilder (Debian package builder)";
         }
-/*
- 
-  */      
     }
 }
 
